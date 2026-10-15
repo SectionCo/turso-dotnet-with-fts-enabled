@@ -31,9 +31,10 @@ $patchedOpts = 'let mut opts = DatabaseOpts::new().with_index_method(true);'
 $targetDir = Join-Path $SourceDir 'rs_compiled'
 $builtDll = Join-Path $targetDir $Target $profileName 'turso_sync_sdk_kit.dll'
 
-# Fetch the exact release tag, so the native library matches the managed package's ABI.
+# Fetch the exact release tag, so the native library matches the managed package's ABI. Turso's conformance snapshots
+# have paths longer than Windows' 260-character limit, so the clone needs long-path support.
 if (-not (Test-Path (Join-Path $SourceDir '.git'))) {
-	git clone --depth 1 --branch $tag https://github.com/tursodatabase/turso.git $SourceDir
+	git -c core.longpaths=true clone --depth 1 --branch $tag https://github.com/tursodatabase/turso.git $SourceDir
 	if ($LASTEXITCODE -ne 0) { throw "Cloning Turso $tag failed." }
 }
 
