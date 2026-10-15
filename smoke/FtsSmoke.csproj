@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<!-- Runs Turso's full-text search through the stock .NET provider with the locally built native library. -->
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<TursoVersion Condition="'$(TursoVersion)' == ''">0.8.1</TursoVersion>
+	</PropertyGroup>
+	<ItemGroup>
+		<PackageReference Include="Turso.Data.Sqlite.Provider" Version="$(TursoVersion)" />
+		<!-- Keep the managed provider but drop the stock native library, which is built without fts. -->
+		<PackageReference Include="Turso.Data.Native" Version="$(TursoVersion)" ExcludeAssets="native" />
+	</ItemGroup>
+	<ItemGroup>
+		<None Include="$(NativeLibrary)" Link="turso_sdk_kit.dll" CopyToOutputDirectory="PreserveNewest" Condition="'$(NativeLibrary)' != ''" />
+	</ItemGroup>
+	<Target Name="RequireNativeLibrary" BeforeTargets="Build">
+		<Error Condition="'$(NativeLibrary)' == '' or !Exists('$(NativeLibrary)')" Text="Pass -p:NativeLibrary=path\to\turso_sdk_kit.dll (the library to test)." />
+	</Target>
+</Project>

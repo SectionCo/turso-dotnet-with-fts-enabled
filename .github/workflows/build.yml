@@ -1,0 +1,138 @@
+name: Build
+
+# Builds turso_sdk_kit.dll with fts for Windows ARM64 and x64, smoke-tests each on its own architecture through the stock
+# .NET provider, and on a v<turso>-fts.<n> tag publishes both DLLs plus SHA256SUMS as a GitHub Release.
+on:
+  push:
+    branches: [main]
+    tags: ["v*-fts.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Turso's Windows images need the MSVC compiler named explicitly (see Turso's dotnet-publish workflow).
+  CC_x86_64_pc_windows_msvc: cl.exe
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      turso: ${{ steps.read.outputs.turso }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        name: Read the Turso version and check it against a release tag
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < turso.version)"
+          echo "turso=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            [[ "$tag" == "v$version-fts."* ]] || { echo "Tag $tag does not match turso.version $version"; exit 1; }
+          fi
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            target: x86_64-pc-windows-msvc
+          - rid: win-arm64
+            target: aarch64-pc-windows-msvc
+    # Both build on x64, as Turso's own workflow does; ARM64 is cross-compiled with the MSVC ARM64 tools.
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Put the MSVC compiler on PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vcvarsall = & $vswhere -latest -products * -find 'VC\Auxiliary\Build\vcvarsall.bat' | Select-Object -First 1
+          $settings = & $env:ComSpec /c "call `"$vcvarsall`" x64 >nul && set"
+          foreach ($setting in $settings) {
+            $separator = $setting.IndexOf('=')
+            if ($separator -lt 1) { continue }
+            $name = $setting.Substring(0, $separator)
+            $value = $setting.Substring($separator + 1)
+            if ($name -eq 'PATH') { Add-Content $env:GITHUB_PATH ($value.Split(';') | Where-Object { $_ }) }
+            elseif ($name -in @('INCLUDE', 'LIB', 'LIBPATH')) { Add-Content $env:GITHUB_ENV "$name=$value" }
+          }
+
+      - name: Build turso_sdk_kit.dll with fts
+        shell: pwsh
+        run: ./build/Build-TursoNative.ps1 -Version ${{ needs.version.outputs.turso }} -Target ${{ matrix.target }} -OutDir out/${{ matrix.rid }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: turso_sdk_kit-${{ matrix.rid }}
+          path: out/${{ matrix.rid }}/turso_sdk_kit.dll
+          if-no-files-found: error
+
+  smoke:
+    needs: [version, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-2025
+          - rid: win-arm64
+            os: windows-11-arm
+    # Each DLL runs on its own architecture, so the ARM64 library is really loaded and exercised.
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: turso_sdk_kit-${{ matrix.rid }}
+          path: native
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run full-text search through Turso.Data.Sqlite
+        shell: pwsh
+        run: dotnet run --project smoke/FtsSmoke.csproj -r ${{ matrix.rid }} -p:TursoVersion=${{ needs.version.outputs.turso }} -p:NativeLibrary=${{ github.workspace }}/native/turso_sdk_kit.dll
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Name the DLLs by runtime and hash them
+        shell: bash
+        run: |
+          mkdir release
+          for rid in win-arm64 win-x64; do
+            cp "artifacts/turso_sdk_kit-$rid/turso_sdk_kit.dll" "release/turso_sdk_kit-$rid.dll"
+          done
+          # Turso is MIT licensed; its notice travels with the binaries.
+          version="${GITHUB_REF_NAME#v}"
+          curl -fsSL "https://raw.githubusercontent.com/tursodatabase/turso/v${version%-fts.*}/LICENSE.md" -o release/TURSO-LICENSE.md
+          (cd release && sha256sum *.dll > SHA256SUMS)
+          cat release/SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "turso_sdk_kit.dll built from Turso ${GITHUB_REF_NAME%-fts.*} with turso_core/fts and the index method enabled. Verify downloads against SHA256SUMS."
