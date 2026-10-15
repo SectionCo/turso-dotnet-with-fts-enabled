@@ -34,6 +34,8 @@ jobs:
       - id: read
         name: Read the Turso version and decide whether this run publishes a release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version="$(tr -d '[:space:]' < turso.version)"
           echo "turso=$version" >> "$GITHUB_OUTPUT"
@@ -43,10 +45,14 @@ jobs:
             [[ "$tag" == "v$version-fts."* ]] || { echo "Tag $tag does not match turso.version $version"; exit 1; }
             echo "release=$tag" >> "$GITHUB_OUTPUT"
           elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
-            # A version that has never been released gets its first build tagged automatically.
-            existing="$(git ls-remote --tags origin "refs/tags/v$version-fts.*")"
-            if [[ -z "$existing" ]]; then
-              echo "release=v$version-fts.1" >> "$GITHUB_OUTPUT"
+            # A version with no published release gets this build released automatically. A tag alone doesn't count
+            # (a hand-pushed tag's build can fail, or its release can be deleted), so the check is on releases. A leftover
+            # tag points at another commit, so the release takes the next unused number on this commit instead of reusing it.
+            pattern="^v${version//./\\.}-fts\.[0-9]+$"
+            released="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1000 --json tagName --jq '.[].tagName' | grep -E "$pattern" || true)"
+            if [[ -z "$released" ]]; then
+              highest="$(git ls-remote --tags origin "refs/tags/v$version-fts.*" | sed -E 's#.*-fts\.([0-9]+)(\^\{\})?$#\1#' | sort -n | tail -n 1)"
+              echo "release=v$version-fts.$(( ${highest:-0} + 1 ))" >> "$GITHUB_OUTPUT"
             fi
           fi
 

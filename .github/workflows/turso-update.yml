@@ -30,17 +30,19 @@ jobs:
           set -euo pipefail
           current="$(tr -d '[:space:]' < turso.version)"
 
-          # Newest stable provider version on NuGet; the managed and native packages ship together, so both must have it.
-          latest="$(curl -fsSL https://api.nuget.org/v3-flatcontainer/turso.data.sqlite.provider/index.json \
-            | jq -r '.versions[] | select(test("-") | not)' | sort -V | tail -n 1)"
-          echo "turso.version: $current, newest stable provider: $latest"
+          # NuGet's search service lists only listed versions (the flat container also has unlisted, withdrawn ones), so
+          # the newest stable provider and the matching native package both come from it. Its address is in the service index.
+          search="$(curl -fsSL https://api.nuget.org/v3/index.json | jq -r '[.resources[] | select(."@type" == "SearchQueryService")][0]."@id"')"
+          listed() { curl -fsSL "$search?q=packageid:$1&prerelease=false&semVerLevel=2.0.0" | jq -r '.data[0].versions[]?.version'; }
+          latest="$(listed turso.data.sqlite.provider | { grep -v -- '-' || true; } | sort -V | tail -n 1)"
+          [[ -n "$latest" ]] || { echo "NuGet search returned no listed provider versions; trying again tomorrow."; exit 0; }
+          echo "turso.version: $current, newest listed stable provider: $latest"
           if [[ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n 1)" == "$current" ]]; then
             echo "Already on the newest release."
             exit 0
           fi
-          curl -fsSL https://api.nuget.org/v3-flatcontainer/turso.data.native/index.json \
-            | jq -e --arg v "$latest" '.versions | index($v)' > /dev/null \
-            || { echo "Turso.Data.Native $latest is not on NuGet yet; trying again tomorrow."; exit 0; }
+          listed turso.data.native | grep -qxF "$latest" \
+            || { echo "Turso.Data.Native $latest is not listed on NuGet yet; trying again tomorrow."; exit 0; }
 
           # The build clones Turso at v<version>, so the tag must exist upstream.
           if [[ -z "$(git ls-remote --tags https://github.com/tursodatabase/turso.git "refs/tags/v$latest")" ]]; then
@@ -48,19 +50,31 @@ jobs:
             exit 0
           fi
 
-          # One branch per version: an open (or deliberately closed) pull request is never opened twice.
+          # One branch per version. A branch from an earlier run resumes whatever that run didn't finish (it can push and
+          # then fail before the pull request or the build); a closed or merged pull request is never reopened.
           branch="turso/v$latest"
           if [[ -n "$(git ls-remote --heads origin "refs/heads/$branch")" ]]; then
-            echo "$branch already exists; nothing to do."
-            exit 0
+            state="$(gh pr list --head "$branch" --state all --json state --jq '.[0].state // ""')"
+            case "$state" in
+              CLOSED|MERGED)
+                echo "$branch has a $state pull request; nothing to do."
+                exit 0 ;;
+              OPEN)
+                if [[ "$(gh run list --workflow build.yml --branch "$branch" --json databaseId --jq 'length')" == 0 ]]; then
+                  echo "$branch has an open pull request but no build; starting it."
+                  gh workflow run build.yml --ref "$branch"
+                fi
+                exit 0 ;;
+            esac
+            echo "$branch exists without a pull request; opening it."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$branch"
+            echo "$latest" > turso.version
+            git commit -am "Build Turso $latest with full-text search"
+            git push origin "$branch"
           fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          echo "$latest" > turso.version
-          git commit -am "Build Turso $latest with full-text search"
-          git push origin "$branch"
 
           gh pr create --base main --head "$branch" --title "Build Turso $latest with full-text search" --body "$(cat <<EOF
           Turso.Data.Sqlite.Provider $latest is on NuGet (this repo builds $current), and Turso has the \`v$latest\` tag.
