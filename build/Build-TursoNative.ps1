@@ -31,9 +31,10 @@ $patchedOpts = 'let mut opts = DatabaseOpts::new().with_index_method(true);'
 $targetDir = Join-Path $SourceDir 'rs_compiled'
 $builtDll = Join-Path $targetDir $Target $profileName 'turso_sync_sdk_kit.dll'
 
-# Fetch the exact release tag, so the native library matches the managed package's ABI.
+# Fetch the exact release tag, so the native library matches the managed package's ABI. Turso's conformance snapshots
+# have paths longer than Windows' 260-character limit, so the clone needs long-path support.
 if (-not (Test-Path (Join-Path $SourceDir '.git'))) {
-	git clone --depth 1 --branch $tag https://github.com/tursodatabase/turso.git $SourceDir
+	git -c core.longpaths=true clone --depth 1 --branch $tag https://github.com/tursodatabase/turso.git $SourceDir
 	if ($LASTEXITCODE -ne 0) { throw "Cloning Turso $tag failed." }
 }
 
@@ -48,11 +49,12 @@ elseif (-not $source.Contains($patchedOpts)) {
 	throw "Expected one '$defaultOpts' in $rsapi, found $count. Update the patch for Turso $tag."
 }
 
-# Build the sync SDK kit (the library the .NET provider loads) with turso_core's fts feature.
-rustup target add $Target
-if ($LASTEXITCODE -ne 0) { throw "rustup could not add $Target." }
+# Build the sync SDK kit (the library the .NET provider loads) with turso_core's fts feature. Turso pins its Rust
+# version in rust-toolchain.toml, so the target is added from inside the checkout, where that toolchain applies.
 Push-Location $SourceDir
 try {
+	rustup target add $Target
+	if ($LASTEXITCODE -ne 0) { throw "rustup could not add $Target to Turso's pinned toolchain." }
 	cargo build -p turso_sync_sdk_kit --target-dir $targetDir --target $Target --profile $profileName --features turso_core/fts
 	if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $Target." }
 }
