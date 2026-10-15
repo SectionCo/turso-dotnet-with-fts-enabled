@@ -21,9 +21,13 @@ Execute(connection, """
 
 // Each check names the behavior the app relies on.
 failures += Check(connection, "exact word", Words, "tower", "tower");
-failures += Check(connection, "prefix", Words, "tow*", "tower", "towne");
 failures += Check(connection, "phrase", Words, "\"corner suite\"", "tower");
-failures += Check(connection, "typo through ngrams", Grams, "towr", "tower");
+// Turso 0.8.1's query parser has no `word*` prefix syntax (it matches nothing), so prefixes go through the ngram index:
+// a partial word is tokenized into grams that must appear in order, which is a substring match.
+failures += Check(connection, "prefix through ngrams", Grams, "tow", "tower", "towne");
+// A misspelled word's grams are not all in order in the text, so the app ORs its trigrams and filters the candidates
+// by edit distance.
+failures += Check(connection, "typo through trigrams", Grams, "tow OR owr", "tower");
 failures += CheckHighlight(connection);
 failures += CheckScoreOrder(connection);
 
