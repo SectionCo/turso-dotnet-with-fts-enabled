@@ -13,8 +13,15 @@ Each release `v<turso>-fts.<n>` carries `turso_sdk_kit-win-arm64.dll`, `turso_sd
 
 ## Releasing a Turso version
 
-1. Set `turso.version` to the Turso release (without `v`) and push. CI builds both DLLs and smoke-tests each on its own architecture (`smoke/`).
-2. Tag `v<turso>-fts.1` (bump `.n` to rebuild the same version). The tag must match `turso.version`. CI publishes the release.
+This is automatic apart from one merge:
+
+1. **Turso update** (`.github/workflows/turso-update.yml`) runs daily. When NuGet has a newer stable `Turso.Data.Sqlite.Provider` (and `Turso.Data.Native`) and Turso has the matching `v<version>` tag, it opens a pull request from `turso/v<version>` that bumps `turso.version`, and starts **Build** on it. Run it by hand from the Actions tab to check now.
+2. **Build** compiles both DLLs at that tag and smoke-tests each on its own architecture (`smoke/`). A failure means Turso changed something our build depends on; fix it on that branch.
+3. **Merge the pull request.** Build runs on `main`, sees that `v<version>-fts.*` has never been released, and publishes `v<version>-fts.1`.
+
+To rebuild a version that is already released (for example after changing the build script), push a tag `v<turso>-fts.<n+1>` by hand. The tag must match `turso.version`. Closing an update pull request without merging keeps its branch, so that version is not proposed again; delete the branch to have it reopened.
+
+Apps don't change on their own: Burvo Windows pins the Turso version and each DLL's SHA-256, and updates them in its own pull request.
 
 ## Building locally
 

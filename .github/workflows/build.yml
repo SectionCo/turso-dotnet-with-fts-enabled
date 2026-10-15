@@ -1,7 +1,9 @@
 name: Build
 
-# Builds turso_sdk_kit.dll with fts for Windows ARM64 and x64, smoke-tests each on its own architecture through the stock
-# .NET provider, and on a v<turso>-fts.<n> tag publishes both DLLs plus SHA256SUMS as a GitHub Release.
+# Builds turso_sdk_kit.dll with fts for Windows ARM64 and x64 and smoke-tests each on its own architecture through the
+# stock .NET provider. It publishes both DLLs plus SHA256SUMS as a GitHub Release when:
+# - main gets a turso.version that has no release yet (it creates v<turso>-fts.1 itself), or
+# - someone pushes a v<turso>-fts.<n> tag by hand, which is how a rebuild of the same Turso version ships.
 on:
   push:
     branches: [main]
@@ -12,6 +14,11 @@ on:
 permissions:
   contents: read
 
+# Two pushes to main must not both try to create the same release; superseded pull request runs are cancelled.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # Turso's Windows images need the MSVC compiler named explicitly (see Turso's dotnet-publish workflow).
   CC_x86_64_pc_windows_msvc: cl.exe
@@ -21,17 +28,26 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       turso: ${{ steps.read.outputs.turso }}
+      release: ${{ steps.read.outputs.release }}
     steps:
       - uses: actions/checkout@v7
       - id: read
-        name: Read the Turso version and check it against a release tag
+        name: Read the Turso version and decide whether this run publishes a release
         shell: bash
         run: |
           version="$(tr -d '[:space:]' < turso.version)"
           echo "turso=$version" >> "$GITHUB_OUTPUT"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            # A hand-pushed tag publishes itself, but only for the version this commit builds.
             tag="${GITHUB_REF#refs/tags/}"
             [[ "$tag" == "v$version-fts."* ]] || { echo "Tag $tag does not match turso.version $version"; exit 1; }
+            echo "release=$tag" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
+            # A version that has never been released gets its first build tagged automatically.
+            existing="$(git ls-remote --tags origin "refs/tags/v$version-fts.*")"
+            if [[ -z "$existing" ]]; then
+              echo "release=v$version-fts.1" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
   build:
@@ -109,11 +125,14 @@ jobs:
         run: dotnet run --project smoke/FtsSmoke.csproj -r ${{ matrix.rid }} -p:TursoVersion=${{ needs.version.outputs.turso }} -p:NativeLibrary=${{ github.workspace }}/native/turso_sdk_kit.dll
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: smoke
+    if: needs.version.outputs.release != ''
+    needs: [version, smoke]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.version.outputs.release }}
+      TURSO: ${{ needs.version.outputs.turso }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -127,12 +146,13 @@ jobs:
             cp "artifacts/turso_sdk_kit-$rid/turso_sdk_kit.dll" "release/turso_sdk_kit-$rid.dll"
           done
           # Turso is MIT licensed; its notice travels with the binaries.
-          version="${GITHUB_REF_NAME#v}"
-          curl -fsSL "https://raw.githubusercontent.com/tursodatabase/turso/v${version%-fts.*}/LICENSE.md" -o release/TURSO-LICENSE.md
+          curl -fsSL "https://raw.githubusercontent.com/tursodatabase/turso/v$TURSO/LICENSE.md" -o release/TURSO-LICENSE.md
           (cd release && sha256sum *.dll > SHA256SUMS)
           cat release/SHA256SUMS
 
+      # --target creates the tag on the built commit when this run came from main; a hand-pushed tag already exists.
+      # A tag made with the workflow token starts no second run, so the DLLs are never built twice.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "turso_sdk_kit.dll built from Turso ${GITHUB_REF_NAME%-fts.*} with turso_core/fts and the index method enabled. Verify downloads against SHA256SUMS."
+        run: gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --notes "turso_sdk_kit.dll built from Turso v$TURSO with turso_core/fts and the index method enabled. Verify downloads against SHA256SUMS."
