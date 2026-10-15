@@ -49,11 +49,12 @@ elseif (-not $source.Contains($patchedOpts)) {
 	throw "Expected one '$defaultOpts' in $rsapi, found $count. Update the patch for Turso $tag."
 }
 
-# Build the sync SDK kit (the library the .NET provider loads) with turso_core's fts feature.
-rustup target add $Target
-if ($LASTEXITCODE -ne 0) { throw "rustup could not add $Target." }
+# Build the sync SDK kit (the library the .NET provider loads) with turso_core's fts feature. Turso pins its Rust
+# version in rust-toolchain.toml, so the target is added from inside the checkout, where that toolchain applies.
 Push-Location $SourceDir
 try {
+	rustup target add $Target
+	if ($LASTEXITCODE -ne 0) { throw "rustup could not add $Target to Turso's pinned toolchain." }
 	cargo build -p turso_sync_sdk_kit --target-dir $targetDir --target $Target --profile $profileName --features turso_core/fts
 	if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $Target." }
 }
