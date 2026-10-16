@@ -20,7 +20,10 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
+      # Update branches always start from main, even when someone runs this by hand from another branch.
       - uses: actions/checkout@v7
+        with:
+          ref: main
 
       - name: Open a pull request for a newer Turso release
         env:
