@@ -1,0 +1,89 @@
+name: Turso update
+
+# Checks NuGet once a day for a newer stable Turso.Data.Sqlite.Provider. When one is out, and Turso has the matching
+# git tag, it opens a pull request that bumps turso.version and starts the Build workflow on it. Merging that pull
+# request publishes v<turso>-fts.1 (see build.yml). Pre-releases are ignored.
+on:
+  schedule:
+    - cron: "17 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: turso-update
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Open a pull request for a newer Turso release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$(tr -d '[:space:]' < turso.version)"
+
+          # NuGet's search service lists only listed versions (the flat container also has unlisted, withdrawn ones), so
+          # the newest stable provider and the matching native package both come from it. Its address is in the service index.
+          search="$(curl -fsSL https://api.nuget.org/v3/index.json | jq -r '[.resources[] | select(."@type" == "SearchQueryService")][0]."@id"')"
+          listed() { curl -fsSL "$search?q=packageid:$1&prerelease=false&semVerLevel=2.0.0" | jq -r '.data[0].versions[]?.version'; }
+          latest="$(listed turso.data.sqlite.provider | { grep -v -- '-' || true; } | sort -V | tail -n 1)"
+          [[ -n "$latest" ]] || { echo "NuGet search returned no listed provider versions; trying again tomorrow."; exit 0; }
+          echo "turso.version: $current, newest listed stable provider: $latest"
+          if [[ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n 1)" == "$current" ]]; then
+            echo "Already on the newest release."
+            exit 0
+          fi
+          listed turso.data.native | grep -qxF "$latest" \
+            || { echo "Turso.Data.Native $latest is not listed on NuGet yet; trying again tomorrow."; exit 0; }
+
+          # The build clones Turso at v<version>, so the tag must exist upstream.
+          if [[ -z "$(git ls-remote --tags https://github.com/tursodatabase/turso.git "refs/tags/v$latest")" ]]; then
+            echo "Turso has no v$latest tag yet; trying again tomorrow."
+            exit 0
+          fi
+
+          # One branch per version. A branch from an earlier run resumes whatever that run didn't finish (it can push and
+          # then fail before the pull request or the build); a closed or merged pull request is never reopened.
+          branch="turso/v$latest"
+          if [[ -n "$(git ls-remote --heads origin "refs/heads/$branch")" ]]; then
+            state="$(gh pr list --head "$branch" --state all --json state --jq '.[0].state // ""')"
+            case "$state" in
+              CLOSED|MERGED)
+                echo "$branch has a $state pull request; nothing to do."
+                exit 0 ;;
+              OPEN)
+                if [[ "$(gh run list --workflow build.yml --branch "$branch" --json databaseId --jq 'length')" == 0 ]]; then
+                  echo "$branch has an open pull request but no build; starting it."
+                  gh workflow run build.yml --ref "$branch"
+                fi
+                exit 0 ;;
+            esac
+            echo "$branch exists without a pull request; opening it."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$branch"
+            echo "$latest" > turso.version
+            git commit -am "Build Turso $latest with full-text search"
+            git push origin "$branch"
+          fi
+
+          gh pr create --base main --head "$branch" --title "Build Turso $latest with full-text search" --body "$(cat <<EOF
+          Turso.Data.Sqlite.Provider $latest is on NuGet (this repo builds $current), and Turso has the \`v$latest\` tag.
+
+          This bumps \`turso.version\`. The Build workflow builds both DLLs at \`v$latest\` and runs the full-text search smoke tests on ARM64 and x64; check its run on this branch. If Turso changed the line \`Build-TursoNative.ps1\` edits, or full-text search no longer works, the run fails and nothing is published.
+
+          Merging publishes \`v$latest-fts.1\`. Burvo Windows only picks it up when its own Turso version and pinned hashes are updated in a separate pull request.
+          EOF
+          )"
+
+          # Pushes and pull requests made with the workflow token start no workflows, so the build is started directly.
+          gh workflow run build.yml --ref "$branch"
